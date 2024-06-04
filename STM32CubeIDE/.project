@@ -296,6 +296,11 @@
 			<locationURI>PARENT-1-PROJECT_LOC/STM32_WPAN/App/app_OTA.c</locationURI>
 		</link>
 		<link>
+			<name>Application/User/STM32_WPAN/App/app_LightBulb.c</name>
+			<type>1</type>
+			<locationURI>PARENT-1-PROJECT_LOC/STM32_WPAN/App/app_LightBulb.c</locationURI>
+		</link>
+		<link>
 			<name>Application/User/STM32_WPAN/Target/hw_ipcc.c</name>
 			<type>1</type>
 			<locationURI>PARENT-1-PROJECT_LOC/STM32_WPAN/Target/hw_ipcc.c</locationURI>
