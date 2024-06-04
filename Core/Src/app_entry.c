@@ -122,6 +122,12 @@ static void Button_Init(void);
 static void RxUART_Init(void);
 static void RxCpltCallback(void);
 static void UartCmdExecute(void);
+static void SW3_LONG_PRESS_TIMER_CB(void);
+extern void APP_ZIGBEE_LaunchPushButtonTask(uint32_t buttonFlag);
+extern void APP_ZIGBEE_LaunchPushButton3ShortPressTask(void);
+extern void APP_ZIGBEE_LaunchPushButton3LongPressTask(void);
+#define GPIO_SW_LONG_PRESS_DURATION                  3000
+#define GPIO_SW_MIN_PRESS_DURATION                    100
 
 #define C_SIZE_CMD_STRING       256U
 #define RX_BUFFER_SIZE          8U
@@ -130,6 +136,8 @@ static uint8_t aRxBuffer[RX_BUFFER_SIZE];
 static uint8_t CommandString[C_SIZE_CMD_STRING];
 static uint16_t indexReceiveChar = 0;
 EXTI_HandleTypeDef exti_handle;
+static uint32_t ButtonPressTime = 0;
+static uint8_t ID1;
 
 /* USER CODE END PFP */
 
@@ -179,6 +187,8 @@ void MX_APPE_Init(void)
    */
 /* USER CODE BEGIN APPE_Init_2 */
 
+  /* Create timer to handle the GPIO press duration */
+  HW_TS_Create(CFG_TIM_APP_SW3_PRESS, &ID1, hw_ts_SingleShot, SW3_LONG_PRESS_TIMER_CB);
 /* USER CODE END APPE_Init_2 */
 
    return;
@@ -555,6 +565,13 @@ static void Button_Init( void )
   BSP_PB_Init(BUTTON_SW1, BUTTON_MODE_EXTI);
   BSP_PB_Init(BUTTON_SW2, BUTTON_MODE_EXTI);
   BSP_PB_Init(BUTTON_SW3, BUTTON_MODE_EXTI);
+
+  /* Enable EXTI callback for both falling and rising edge on SW3 button */
+  GPIO_InitTypeDef gpioinitstruct;
+  gpioinitstruct.Pin = BUTTON_SW3_PIN;
+  gpioinitstruct.Pull = GPIO_PULLUP;
+  gpioinitstruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+  HAL_GPIO_Init(BUTTON_SW3_GPIO_PORT, &gpioinitstruct);
 #endif /* (CFG_BUTTON_SUPPORTED == 1U) */
 
     return;
@@ -669,17 +686,51 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
   switch (GPIO_Pin) 
   {
     case BUTTON_SW1_PIN:
+      APP_ZIGBEE_LaunchPushButtonTask(BUTTON_SW1_PIN);
       break;
 
     case BUTTON_SW2_PIN:
+      APP_ZIGBEE_LaunchPushButtonTask(BUTTON_SW2_PIN);
       break;
 
     case BUTTON_SW3_PIN:
+      /* Check if pressed or released*/
+      if(HAL_GPIO_ReadPin(BUTTON_SW3_GPIO_PORT, BUTTON_SW3_PIN))
+      {
+        /* SW3 released */
+        HW_TS_Stop(ID1);
+        APP_DBG("SW3 released, timer stopped");
+        uint32_t press_duration = abs(HAL_GetTick() - ButtonPressTime);
+        APP_DBG("SW3 press duration  %d",press_duration);
+        if((presss_duration < GPIO_SW_LONG_PRESS_DURATION) && (presss_duration > GPIO_SW_MIN_PRESS_DURATION))
+        {
+          /* SW3 short press detected */
+          APP_DBG("SW3 short press, z3.0 commissioning");
+          APP_ZIGBEE_LaunchPushButton3ShortPressTask();
+        }
+      }
+      else
+      {
+        /* SW3 pressed, start the timer */
+        ButtonPressTime = HAL_GetTick();
+        APP_DBG("SW3 pressed, timer stared");
+        HW_TS_Start(ID1,(GPIO_SW_LONG_PRESS_DURATION*1000/CFG_TS_TICK_VAL));
+      }
       break;
 
     default:
       break;
   }
+}
+
+static void SW3_LONG_PRESS_TIMER_CB(void)
+{
+  /* SW3 long press detected */
+	APP_DBG("SW3 long press, touchlink commissioning");
+	APP_ZIGBEE_LaunchPushButton3LongPressTask();
+	uint32_t press_duration = abs(HAL_GetTick() - ButtonPressTime);
+	APP_DBG("SW3 press duration  %d",press_duration);
+
 }
 
 static void RxUART_Init(void)
