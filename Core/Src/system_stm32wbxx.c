@@ -82,7 +82,7 @@
   * @{
   */
 
-#include "stm32wbxx.h"
+#include "app_common.h"
 
 #if !defined  (HSE_VALUE)
 #define HSE_VALUE    (32000000UL) /*!< Value of the External oscillator in Hz */
@@ -116,6 +116,7 @@
   * @{
   */
 
+typedef void (*fct_t)(void);
 /**
   * @}
   */
@@ -203,6 +204,216 @@ const uint32_t SmpsPrescalerTable[4UL][6UL] = {{1UL, 3UL, 2UL, 2UL, 1UL, 2UL}, \
 /** @addtogroup STM32WBxx_System_Private_Functions
   * @{
   */
+static void JumpFwApp( void );
+static void BootModeCheck( void );
+static void JumpSelectionOnPowerUp( void );
+static uint8_t  CheckFwAppValidity( void );
+
+/**
+ * Check the Boot mode request
+ * Depending on the result, the CPU may either jump to an existing application in the user flash
+ * or keep on running the code to start the OTA loader
+ */
+static void BootModeCheck( void )
+{
+  if ( LL_RCC_IsActiveFlag_SFTRST( ) || LL_RCC_IsActiveFlag_OBLRST( ) )
+  {
+    /**
+     * The SRAM1 content is kept on Software Reset.
+     * In the Thread_Ota application, the first address of the SRAM1 indicates which kind of action has been requested
+     */
+
+    /**
+     * Check Boot Mode from SRAM1
+     */
+    if ( ( *(uint8_t*)SRAM1_BASE) == CFG_REBOOT_ON_DOWNLOADED_FW )
+    {
+      if ( CheckFwAppValidity( ) != 0 )
+      {
+        /**
+        * The user has requested to start on the firmware application and it has been checked
+        * a valid application is ready
+        * Jump now on the application
+        */
+        JumpFwApp();
+      }
+      else
+      {
+        /**
+         * The user has requested to start on the firmware application but there is no valid application
+         * Erase all sectors specified by byte1 and byte1 in SRAM1 to download a new App.
+         */
+        *(uint8_t*)SRAM1_BASE = CFG_REBOOT_ON_OTA_FW;     /* Request to reboot on Thread_Ota application */
+        *((uint8_t*)SRAM1_BASE+1) = CFG_APP_START_SECTOR_INDEX;
+        *((uint8_t*)SRAM1_BASE+2) = 0xFF;
+      }
+    }
+    else
+    {
+      if ( ( *(uint8_t*)SRAM1_BASE ) == CFG_REBOOT_ON_OTA_FW )
+      {
+        /**
+         * It has been requested to reboot on Thread_Ota application to download data
+         * If the FW-App Start Sector is at '0' or bad (random) set default FW-App Start Sector.
+         */
+        if ( *( (uint8_t*)SRAM1_BASE + 1 ) < CFG_APP_START_SECTOR_INDEX )
+        {
+          *((uint8_t*)SRAM1_BASE+1) = CFG_APP_START_SECTOR_INDEX;
+          *((uint8_t*)SRAM1_BASE+2) = 0xFF;
+        }
+      }
+      else
+      {
+        if ( ( *(uint8_t*)SRAM1_BASE ) == CFG_REBOOT_ON_CPU2_UPGRADE )
+        {
+          /**
+           * It has been requested to reboot on Thread_Ota application to keep running the firmware upgrade process
+           *
+           */
+        }
+        else
+        {
+          /**
+           * There should be no use case to be there because the device already starts from power up
+           * and the SRAM1 is then filled with the value define by the user
+           * However, it could be that a reset occurs just after a power up and in that case, the Thread_Ota
+           * will be running but the sectors to download a new App may not be erased
+           */
+          JumpSelectionOnPowerUp( );
+        }
+      }
+    }
+  }
+  else
+  {
+    /**
+     * On Power up, the content of SRAM1 is random
+     * The only thing that could be done is to jump on either the firmware application
+     * or the Thread_Ota application
+     */
+    JumpSelectionOnPowerUp( );
+  }
+
+  /**
+   * Return to the startup file and run the Thread_Ota application
+   */
+  return;
+}
+
+static void JumpSelectionOnPowerUp( void )
+{
+  /**
+   * Check if there is a FW App
+   */
+  if ( CheckFwAppValidity( ) != 0 )
+  {
+    /**
+     * The SRAM1 is random but Application FW exist.
+     * Initialize SRAM1 to indicate we requested to reboot of firmware application
+     */
+    *(uint8_t*)SRAM1_BASE = CFG_REBOOT_ON_DOWNLOADED_FW;
+
+    /**
+     * A valid application is available
+     * Jump now on the application
+     */
+    JumpFwApp();
+  }
+  else
+  {
+    /**
+     * The SRAM1 is random
+     * Initialize SRAM1 to indicate we requested to reboot of Thread_Ota application
+     */
+    *(uint8_t*)SRAM1_BASE = CFG_REBOOT_ON_OTA_FW;
+
+    /**
+     * There is no valid application available
+     * Erase all sectors specified by byte1 and byte1 in SRAM1 to download a new App.
+     */
+    *((uint8_t*)SRAM1_BASE+1) = CFG_APP_START_SECTOR_INDEX;
+    *((uint8_t*)SRAM1_BASE+2) = 0xFF;
+  }
+  return;
+}
+
+/**
+ * Jump to existing FW App in flash
+ * It never returns
+ */
+static void JumpFwApp( void )
+{
+  fct_t app_reset_handler;
+
+  SCB->VTOR = FLASH_BASE + (CFG_APP_START_SECTOR_INDEX * 0x1000);
+  __set_MSP(*(uint32_t*)(FLASH_BASE + (CFG_APP_START_SECTOR_INDEX * 0x1000)));
+  app_reset_handler = (fct_t)(*(uint32_t*)(FLASH_BASE + (CFG_APP_START_SECTOR_INDEX * 0x1000) + 4));
+  app_reset_handler();
+
+  /**
+   * app_reset_handler() never returns.
+   * However, if for any reason a PUSH instruction is added at the entry of  JumpFwApp(),
+   * we need to make sure the POP instruction is not there before app_reset_handler() is called
+   * The way to ensure this is to add a dummy code after app_reset_handler() is called
+   * This prevents app_reset_handler() to be the last code in the function.
+   */
+  __WFI();
+
+
+  return;
+}
+
+static uint8_t CheckFwAppValidity( void )
+{
+  uint8_t status;
+  uint32_t magic_keyword_address;
+  uint32_t last_user_flash_address;
+  uint32_t sbrv_field, sbrv_field_sector, last_user_flash_address_sfsa, last_user_flash_address_sbrv;
+
+  magic_keyword_address = *(uint32_t*)(FLASH_BASE + (CFG_APP_START_SECTOR_INDEX * 0x1000 + 0x140));
+  last_user_flash_address_sfsa = (((READ_BIT(FLASH->SFR, FLASH_SFR_SFSA) >> FLASH_SFR_SFSA_Pos) << 12) + FLASH_BASE) - 4;
+
+  sbrv_field = (READ_BIT(FLASH->SRRVR, FLASH_SRRVR_SBRV) >> FLASH_SRRVR_SBRV_Pos);
+  /* Divide sbrv_field by 1024 to be compared to SFSA value */
+  sbrv_field_sector = sbrv_field / 1024;
+  last_user_flash_address_sbrv = ((sbrv_field_sector << 12) + FLASH_BASE) - 4;
+
+  if(last_user_flash_address_sbrv < last_user_flash_address_sfsa)
+  {
+    last_user_flash_address = last_user_flash_address_sbrv;
+  }
+  else
+  {
+    last_user_flash_address = last_user_flash_address_sfsa;
+  }
+
+  if( (magic_keyword_address < FLASH_BASE) || (magic_keyword_address > last_user_flash_address) )
+  {
+    /**
+     * The address is not valid
+     */
+    status = 0;
+  }
+  else
+  {
+    if( (*(uint32_t*)magic_keyword_address) != 0x94448A29  )
+    {
+      /**
+       * A firmware update procedure did not complete
+       */
+      status = 0;
+    }
+    else
+    {
+      /**
+       * The firmware application is available
+       */
+      status = 1;
+    }
+  }
+
+  return status;
+}
 
 /**
   * @brief  Setup the microcontroller system.
@@ -211,6 +422,8 @@ const uint32_t SmpsPrescalerTable[4UL][6UL] = {{1UL, 3UL, 2UL, 2UL, 1UL, 2UL}, \
   */
 void SystemInit(void)
 {
+  BootModeCheck();
+
 #if defined(USER_VECT_TAB_ADDRESS)
   /* Configure the Vector Table location add offset address ------------------*/
   SCB->VTOR = VECT_TAB_BASE_ADDRESS | VECT_TAB_OFFSET;

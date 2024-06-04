@@ -120,6 +120,11 @@ static void APP_ZIGBEE_SW2_Process(void);
 void APP_ZIGBEE_LaunchPushButtonTask(uint32_t buttonFlag);
 void APP_ZIGBEE_LaunchPushButton3ShortPressTask(void);
 void APP_ZIGBEE_LaunchPushButton3LongPressTask(void);
+/* OTA application related functions */
+
+extern void APP_ZIGBEE_OTA_Client_Init(void);
+extern void APP_ZIGBEE_OTA_ConfigEndpoints(void);
+extern void APP_ZIGBEE_OTA_ThreadsInit(void);
 /* USER CODE END PFP */
 
 /* Private variables ---------------------------------------------------------*/
@@ -339,6 +344,9 @@ void APP_ZIGBEE_Init(void)
   OsTaskNwkFormId = osThreadNew(APP_ZIGBEE_ProcessNwkForm, NULL,&TaskNwkForm_attr);
 
   /* USER CODE BEGIN APP_ZIGBEE_INIT */
+#ifdef OTA_SUPPORT
+  APP_ZIGBEE_OTA_ThreadsInit();
+#endif
   /* USER CODE END APP_ZIGBEE_INIT */
   
   /* Start the Zigbee on the CPU2 side */
@@ -448,6 +456,11 @@ static void APP_ZIGBEE_ConfigEndpoints(void)
   assert(zigbee_app_info.identify_server_1 != NULL);
   ZbZclClusterEndpointRegister(zigbee_app_info.identify_server_1);
 
+#ifdef OTA_SUPPORT
+  /* OTA client */
+  APP_ZIGBEE_OTA_ConfigEndpoints();
+#endif
+
   /* USER CODE BEGIN CONFIG_ENDPOINT */
   /* USER CODE END CONFIG_ENDPOINT */
 }
@@ -554,6 +567,10 @@ static void APP_ZIGBEE_NwkForm(void)
       APP_DBG("Startup done !\n");
       /* USER CODE BEGIN 3 */
        BSP_LED_On(LED_BLUE);
+#ifdef OTA_SUPPORT
+      /* Prepare for OTA */
+      APP_ZIGBEE_OTA_Client_Init();
+#endif
       /* Register Persistent data change notification */
       ZbPersistNotifyRegister(zigbee_app_info.zb,APP_ZIGBEE_persist_notify_cb,NULL);
       /* Call the callback once here to save persistence data */

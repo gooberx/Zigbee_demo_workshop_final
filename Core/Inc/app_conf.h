@@ -345,5 +345,21 @@ typedef enum
 
 #define CFG_OTP_END_ADRESS      OTP_AREA_END_ADDR
 
+/******************************************************************************
+ * FUOTA
+ ******************************************************************************/
+
+/**
+ * Define the start address where the application shall be located
+ */
+#define CFG_APP_START_SECTOR_INDEX      (0x30)
+
+/**
+ * Define list of reboot reason
+ */
+#define CFG_REBOOT_ON_DOWNLOADED_FW     (0x00)    /* Rebbot on Downloaded FW */
+#define CFG_REBOOT_ON_OTA_FW            (0x01)    /* Rebbot on OTA FW */
+#define CFG_REBOOT_ON_CPU2_UPGRADE      (0x02)    /* Reboot on OTA FW to download CPU2 */
+
 #endif /*APP_CONF_H */
 
