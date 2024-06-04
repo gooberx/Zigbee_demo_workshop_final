@@ -59,6 +59,21 @@ typedef enum
 /* Exported constants --------------------------------------------------------*/
 
 /* USER CODE BEGIN EC */
+struct zigbee_app_info
+{
+  bool has_init;
+  struct ZigBeeT *zb;
+  enum ZbStartType startupControl;
+  enum ZbStatusCodeT join_status;
+  uint32_t join_delay;
+  bool init_after_join;
+  uint8_t join_retry_counter;
+  uint32_t persistNumWrites;
+  bool fresh_startup;
+
+  struct ZbZclClusterT *onOff_server_1;
+  struct ZbZclClusterT *identify_server_1;
+};
 
 /* USER CODE END EC */
 

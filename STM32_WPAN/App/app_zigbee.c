@@ -143,21 +143,6 @@ PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static TL_CmdPacket_t ZigbeeOtCmdBuffer;
 PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static uint8_t ZigbeeNotifRspEvtBuffer[sizeof(TL_PacketHeader_t) + TL_EVT_HDR_SIZE + 255U];
 PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static uint8_t ZigbeeNotifRequestBuffer[sizeof(TL_PacketHeader_t) + TL_EVT_HDR_SIZE + 255U];
 
-struct zigbee_app_info
-{
-  bool has_init;
-  struct ZigBeeT *zb;
-  enum ZbStartType startupControl;
-  enum ZbStatusCodeT join_status;
-  uint32_t join_delay;
-  bool init_after_join;
-  uint8_t join_retry_counter;
-  uint32_t persistNumWrites;
-  bool fresh_startup;
-
-  struct ZbZclClusterT *onOff_server_1;
-  struct ZbZclClusterT *identify_server_1;
-};
 static struct zigbee_app_info zigbee_app_info;
 
 /* OnOff server 1 custom callbacks */
