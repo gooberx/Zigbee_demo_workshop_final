@@ -147,6 +147,8 @@ struct zigbee_app_info
 
   struct ZbZclClusterT *onOff_server_1;
   struct ZbZclClusterT *identify_server_1;
+  struct ZbZclClusterT *scenes_server_1;
+  struct ZbZclClusterT *groups_server_1;
   struct ZbZclClusterT *ota_client;
 };
 

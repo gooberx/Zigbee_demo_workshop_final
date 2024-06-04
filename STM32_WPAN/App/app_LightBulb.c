@@ -37,8 +37,11 @@
 #include "zcl/zcl.h"
 #include "zcl/general/zcl.onoff.h"
 #include "zcl/general/zcl.identify.h"
+#include "zcl/general/zcl.scenes.h"
+#include "zcl/general/zcl.groups.h"
 
 /* USER CODE BEGIN Includes */
+#include "timers.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -48,6 +51,7 @@
 /* Private defines -----------------------------------------------------------*/
 
 /* USER CODE BEGIN PD */
+#define PERIOD_BLINK                                    100
 /* USER CODE END PD */
 
 /* Private macros ------------------------------------------------------------*/
@@ -68,6 +72,8 @@ extern struct zigbee_app_info zigbee_app_info;
 enum ZclStatusCodeT onOff_server_1_off(struct ZbZclClusterT *cluster, struct ZbZclAddrInfoT *srcInfo, void *arg);
 enum ZclStatusCodeT onOff_server_1_on(struct ZbZclClusterT *cluster, struct ZbZclAddrInfoT *srcInfo, void *arg);
 enum ZclStatusCodeT onOff_server_1_toggle(struct ZbZclClusterT *cluster, struct ZbZclAddrInfoT *srcInfo, void *arg);
+static void APP_ZIGBEE_IdentifyCallback(struct ZbZclClusterT *cluster, enum ZbZclIdentifyServerStateT state, void *arg);
+static void APP_LED_ToggleCallback(TimerHandle_t xTimer);
 
 /* USER CODE END PFP */
 
@@ -79,6 +85,7 @@ struct ZbZclOnOffServerCallbacksT OnOffServerCallbacks_1 =
   .toggle = onOff_server_1_toggle,
 };
 
+ static TimerHandle_t blinkTimer;
 /* FreeRtos stacks attributes */
 
 /* USER CODE BEGIN PV */
@@ -102,6 +109,26 @@ void APP_ZIGBEE_LightBulb_ConfigEndpoints(void)
   zigbee_app_info.zb, SW1_ENDPOINT, NULL);
   assert(zigbee_app_info.identify_server_1 != NULL);
   ZbZclClusterEndpointRegister(zigbee_app_info.identify_server_1);
+  assert(zigbee_app_info.identify_server_1 != NULL);
+  ZbZclClusterEndpointRegister(zigbee_app_info.identify_server_1);
+
+  /* Groups server */
+  zigbee_app_info.groups_server_1 = ZbZclGroupsServerAlloc(zigbee_app_info.zb, SW1_ENDPOINT);
+  assert(zigbee_app_info.groups_server_1 != NULL);
+  ZbZclClusterEndpointRegister(zigbee_app_info.groups_server_1);
+
+  /* Scenes server */
+  zigbee_app_info.scenes_server_1 = ZbZclScenesServerAlloc(zigbee_app_info.zb, SW1_ENDPOINT, 10);
+  assert(zigbee_app_info.scenes_server_1 != NULL);
+  ZbZclClusterEndpointRegister(zigbee_app_info.scenes_server_1);
+
+  ZbZclIdentifyServerSetCallback(zigbee_app_info.identify_server_1, APP_ZIGBEE_IdentifyCallback);
+
+  blinkTimer = xTimerCreate("Blinking Timer", // Just a text name, not used by the kernel.
+                            PERIOD_BLINK,   // The timer period in ticks.
+                            pdTRUE,  // The timers will auto-reload themselves when they expire.
+                            (void*) 1, // Assign each timer a unique id equal to its array index.
+                            APP_LED_ToggleCallback // Each timer calls the same callback when it expires. );
 }
 
 /**
@@ -184,4 +211,44 @@ enum ZclStatusCodeT onOff_server_1_toggle(struct ZbZclClusterT *cluster, struct 
   }
   /* USER CODE END 2 OnOff server 1 toggle 1 */
 }
+
+/**
+ * @brief  Identify command callback
+ * @param  struct ZbZclClusterT *cluster, enum ZbZclIdentifyServerStateT state, void *arg
+ * @retval none
+ */
+void APP_ZIGBEE_IdentifyCallback(struct ZbZclClusterT *cluster, enum ZbZclIdentifyServerStateT state, void *arg)
+{
+  if (state == ZCL_IDENTIFY_START)
+  {
+    APP_DBG("Identify START");
+    /* Start the timer.  No block time is specified, and even if one was
+       it would be ignored because the scheduler has not yet been started. */
+    if ( xTimerStart( blinkTimer, 0 ) != pdPASS)
+    {
+      APP_DBG("The timer could not be set into the Active state.");
+    }
+  }
+
+  if (state == ZCL_IDENTIFY_STOP)
+  {
+    APP_DBG("Identify STOP");
+    if ( xTimerStop( blinkTimer, 0 ) != pdPASS)
+    {
+      APP_DBG("The timer could not be set into the Active state.");		}
+      BSP_LED_Off(LED_GREEN);
+    }
+  }
+}
+
+/**
+ * @brief  SW Timer callback function handling the identify cluster LED blinking
+ * @param  timer handle
+ * @retval none
+ */
+static void APP_LED_ToggleCallback(TimerHandle_t xTimer)
+{
+  BSP_LED_Toggle(LED_GREEN);
+}
+
 
