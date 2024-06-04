@@ -39,6 +39,8 @@
 #include "zcl/general/zcl.identify.h"
 
 /* USER CODE BEGIN Includes */
+#include "ee.h"
+#include "hw_flash.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -67,6 +69,7 @@
 #endif
 /* USER CODE BEGIN PD */
 #define SW1_GROUP_ADDR                              0x0001
+#define CFG_NVM                                      1U /* use FLASH */
 #define APP_ZIGBEE_NETWORK_JOIN_MAX_RETRY           10U
 /* USER CODE END PD */
 
@@ -98,6 +101,18 @@ static void APP_ZIGBEE_ProcessNwkForm(void * argument);
 
 /* USER CODE BEGIN PFP */
 static void APP_ZIGBEE_ConfigGroupAddr(void);
+static enum ZbStatusCodeT APP_ZIGBEE_ZbStartupPersist(struct ZigBeeT *zb);
+static void APP_ZIGBEE_persist_notify_cb(struct ZigBeeT *zb, void *cbarg);
+static void APP_ZIGBEE_PersistCompleted_callback(enum ZbStatusCodeT status,void *arg);
+static bool APP_ZIGBEE_persist_save(void);
+static bool APP_ZIGBEE_persist_load(void);
+static enum ZclStatusCodeT APP_ZIGBEE_RestoreClusterAttr(struct ZbZclClusterT *clusterPtr);
+#ifdef CFG_NVM
+static void APP_ZIGBEE_NVM_Init(void);
+static bool APP_ZIGBEE_NVM_Read(void);
+static bool APP_ZIGBEE_NVM_Write(void);
+static void APP_ZIGBEE_NVM_Erase(void);
+#endif /* CFG_NVM */
 
 static void APP_ZIGBEE_ProcessPushButton(void *argument);
 static void APP_ZIGBEE_SW1_Process(void);
@@ -137,6 +152,8 @@ struct zigbee_app_info
   uint32_t join_delay;
   bool init_after_join;
   uint8_t join_retry_counter;
+  uint32_t persistNumWrites;
+  bool fresh_startup;
 
   struct ZbZclClusterT *onOff_server_1;
   struct ZbZclClusterT *identify_server_1;
@@ -209,6 +226,18 @@ const uint8_t sec_key_touchlink_master[ZB_SEC_KEYSIZE] = {
     0x9F, 0x55, 0x95, 0xF1, 0x02, 0x57, 0xC8, 0xA4,
     0x69, 0xCB, 0xF4, 0x2B, 0xC9, 0x3F, 0xEE, 0x31
 };
+
+/* NVM variables */
+/* cache in uninit RAM to store/retrieve persistent data */
+union cache
+{
+  uint8_t  U8_data[ST_PERSIST_MAX_ALLOC_SZ];     // in bytes
+  uint32_t U32_data[ST_PERSIST_MAX_ALLOC_SZ/4U]; // in U32 words
+};
+__attribute__ ((section(".noinit"))) union cache cache_persistent_data;
+
+__attribute__ ((section(".noinit"))) union cache cache_diag_reference;
+
 /* USER CODE END PV */
 /* Functions Definition ------------------------------------------------------*/
 
@@ -301,6 +330,11 @@ void APP_ZIGBEE_Init(void)
   /* Init config buffer and call TL_ZIGBEE_Init */
   APP_ZIGBEE_TL_INIT();
 
+  /* NVM Init */
+#if CFG_NVM
+  APP_ZIGBEE_NVM_Init();
+#endif
+
   /* Initialize the mutex */
   MtxZigbeeId = osMutexNew( NULL );
 
@@ -340,6 +374,7 @@ void APP_ZIGBEE_Init(void)
 static void APP_ZIGBEE_StackLayersInit(void)
 {
   APP_DBG("APP_ZIGBEE_StackLayersInit");
+  enum ZbStatusCodeT status = ZB_STATUS_SUCCESS;
 
   zigbee_app_info.zb = ZbInit(0U, NULL, NULL);
   assert(zigbee_app_info.zb != NULL);
@@ -367,6 +402,32 @@ static void APP_ZIGBEE_StackLayersInit(void)
 
   /* Initialization Complete */
   zigbee_app_info.has_init = true;
+  /* Define if we need to do a fresh start */
+  zigbee_app_info.fresh_startup = true;
+
+  /* First we disable the persistent notification */
+  ZbPersistNotifyRegister(zigbee_app_info.zb,NULL,NULL);
+
+  /* Call a startup from persistence */
+  status = APP_ZIGBEE_ZbStartupPersist(zigbee_app_info.zb);
+  if(status == ZB_STATUS_SUCCESS)
+  {
+    /* No fresh startup needed anymore */
+    zigbee_app_info.fresh_startup = false;
+    APP_DBG("ZbStartupPersist: SUCCESS, restarted from persistence");
+    BSP_LED_On(LED_GREEN);
+  }
+  else
+  {
+    /* Start-up form persistence failed, perform a fresh ZbStartup */
+    APP_DBG("ZbStartupPersist: FAILED to restart from persistence with status: 0x%02x",status);
+  }
+
+  if(zigbee_app_info.fresh_startup)
+  {
+    /* Go for fresh start */
+    osThreadFlagsSet(OsTaskNwkFormId,1);
+  }
 
   /* run the task */
   //VST_COMMENT: We have kept the following line commented, so what happens if we reach this point (and we do not form the network)
@@ -508,6 +569,10 @@ static void APP_ZIGBEE_NwkForm(void)
       APP_DBG("Startup done !\n");
       /* USER CODE BEGIN 3 */
        BSP_LED_On(LED_BLUE);
+      /* Register Persistent data change notification */
+      ZbPersistNotifyRegister(zigbee_app_info.zb,APP_ZIGBEE_persist_notify_cb,NULL);
+      /* Call the callback once here to save persistence data */
+      APP_ZIGBEE_persist_notify_cb(zigbee_app_info.zb,NULL);
       /* USER CODE END 3 */
     }
     else
@@ -1003,5 +1068,342 @@ static void APP_ZIGBEE_SW2_Process(void)
 {
   APP_DBG("APP_ZIGBEE_SW2_Process.");
 } /* APP_ZIGBEE_SW2_Process */
+
+/**
+ * @brief  notify to save persistent data callback
+ * @param  zb: Zigbee device object pointer, cbarg: callback arg pointer
+ * @retval None
+ */
+static void APP_ZIGBEE_persist_notify_cb(struct ZigBeeT *zb, void *cbarg)
+{
+  APP_DBG("Notification to save persistent data requested from stack");
+  /* Save the persistent data */
+  APP_ZIGBEE_persist_save();
+} /* APP_ZIGBEE_persist_notify_cb */
+
+/**
+ * @brief  Save persistent data
+ * @param  None
+ * @retval true if success , false if fail
+ */
+static bool APP_ZIGBEE_persist_save(void)
+{
+  uint32_t len;
+
+  /* Clear the RAM cache before saving */
+  memset(cache_persistent_data.U8_data, 0x00, ST_PERSIST_MAX_ALLOC_SZ);
+
+  /* Call the satck API t get current persistent data */
+  len = ZbPersistGet(zigbee_app_info.zb, 0, 0);
+  /* Check Length range */
+  if (len == 0U)
+  {
+    /* If the persistence length was zero then no data available. */
+    APP_DBG("APP_ZIGBEE_persist_save: no persistence data to save !");
+    return false;
+  }
+  if (len > ST_PERSIST_MAX_ALLOC_SZ)
+  {
+    /* if persistence length to big to store */
+    APP_DBG("APP_ZIGBEE_persist_save: persist size too large for storage (%d)", len);
+    return false;
+  }
+
+  /* Store in cache the persistent data */
+  len = ZbPersistGet(zigbee_app_info.zb, &cache_persistent_data.U8_data[ST_PERSIST_FLASH_DATA_OFFSET], len);
+
+  /* Store in cache the persistent data length */
+  cache_persistent_data.U32_data[0] = len;
+
+  zigbee_app_info.persistNumWrites++;
+  APP_DBG("APP_ZIGBEE_persist_save: Persistence written in cache RAM (num writes = %d) len=%d",
+           zigbee_app_info.persistNumWrites, cache_persistent_data.U32_data[0]);
+
+#ifdef CFG_NVM
+  if(!APP_ZIGBEE_NVM_Write())
+  {
+    return false;
+  }
+  APP_DBG("APP_ZIGBEE_persist_save: Persistent data FLASHED");
+#endif /* CFG_NVM */
+
+  return true;
+} /* APP_ZIGBEE_persist_save */
+
+/**
+ * @brief  Start Zigbee Network from persistent data
+ * @param  zb: Zigbee device object pointer
+ * @retval Zigbee stack Status code
+ */
+static enum ZbStatusCodeT APP_ZIGBEE_ZbStartupPersist(struct ZigBeeT* zb)
+{
+  bool read_status;
+  enum ZbStatusCodeT status = ZB_STATUS_SUCCESS;
+
+  /* Restore persistence */
+  read_status = APP_ZIGBEE_persist_load();
+
+  if (read_status)
+  {
+    /* Make sure the EPID is cleared, before we are allowed to restore persistence */
+    uint64_t epid = 0U;
+    ZbNwkSet(zb, ZB_NWK_NIB_ID_ExtendedPanId, &epid, sizeof(uint64_t));
+
+    /* Start-up from persistence */
+    APP_DBG("APP_ZIGBEE_ZbStartupPersist: restoring stack persistence");
+    status = ZbStartupPersist(zb, &cache_persistent_data.U8_data[4], cache_persistent_data.U32_data[0],NULL,APP_ZIGBEE_PersistCompleted_callback,NULL);
+  }
+  else
+  {
+    /* Failed to restart from persistence */
+    APP_DBG("APP_ZIGBEE_ZbStartupPersist: no persistence data to restore");
+    status = ZB_STATUS_ALLOC_FAIL;
+  }
+
+  /* Only for debug purpose, depending of persistent data, following traces
+  could display bytes that are irrelevants to on off cluster */
+  if(status == ZB_STATUS_SUCCESS)
+  {
+    /* read the last bytes of data where the ZCL on off persistent data shall be*/
+    uint32_t len = cache_persistent_data.U32_data[0] + 4 ;
+    APP_DBG("ClusterID %02x %02x",cache_persistent_data.U8_data[len-9],cache_persistent_data.U8_data[len-10]);
+    APP_DBG("Endpoint %02x %02x",cache_persistent_data.U8_data[len-7],cache_persistent_data.U8_data[len-8]);
+    APP_DBG("Direction %02x",cache_persistent_data.U8_data[len-6]);
+    APP_DBG("AttrID %02x %02x",cache_persistent_data.U8_data[len-4],cache_persistent_data.U8_data[len-5]);
+    APP_DBG("Len %02x %02x",cache_persistent_data.U8_data[len-2],cache_persistent_data.U8_data[len-3]);
+    APP_DBG("Value %02x",cache_persistent_data.U8_data[len-1]);
+  }
+
+  return status;
+} /* APP_ZIGBEE_ZbStartupPersist */
+
+/**
+ * @brief  Load persistent data
+ * @param  None
+ * @retval true if success, false if fail
+ */
+static bool APP_ZIGBEE_persist_load(void)
+{
+#ifdef CFG_NVM
+  APP_DBG("Retrieving persistent data from FLASH");
+  return APP_ZIGBEE_NVM_Read();
+#else
+  /* Check length range */
+  if ((cache_persistent_data.U32_data[0] == 0) ||
+      (cache_persistent_data.U32_data[0] > ST_PERSIST_MAX_ALLOC_SZ))
+  {
+    APP_DBG("No data or too large length : %d",cache_persistent_data.U32_data[0]);
+    return false;
+  }
+  return true;
+#endif /* CFG_NVM */
+} /* APP_ZIGBEE_persist_load */
+
+/**
+ * @brief  timer callback to wait end of restore cluster persistence form M0
+ * @param  None
+ * @retval None
+ */
+static void APP_ZIGBEE_PersistCompleted_callback(enum ZbStatusCodeT status,void *arg)
+{
+  if(status == ZB_WPAN_STATUS_SUCCESS)
+  {
+    APP_DBG("Persist complete callback entered with SUCCESS");
+    /* Restore the on/off value based on persitence loaded */
+    if(APP_ZIGBEE_RestoreClusterAttr(zigbee_app_info.onOff_server_1)==ZCL_STATUS_SUCCESS)
+    {
+      APP_DBG("Read back OnOff cluster attribute : SUCCESS");
+    }
+    else
+    {
+      APP_DBG("Read back OnOff cluster attribute : FAILED");
+    }
+  }
+  else
+  {
+    APP_DBG("Error in persist complete callback %x",status);
+  }
+  /* Register Persistent data change notification */
+  ZbPersistNotifyRegister(zigbee_app_info.zb,APP_ZIGBEE_persist_notify_cb,NULL);
+
+  /* Call the callback once here to save persistence data */
+  APP_ZIGBEE_persist_notify_cb(zigbee_app_info.zb,NULL);
+} /* APP_ZIGBEE_PersistCompleted_callback */
+
+
+/**
+ * @brief  read on off attribute after a startup form persistence
+ * @param  clusterPtr: pointer to cluster
+ *
+ * @retval stack status code
+ */
+static enum ZclStatusCodeT APP_ZIGBEE_RestoreClusterAttr(struct ZbZclClusterT *clusterPtr)
+{
+  uint8_t attrVal;
+
+  if (ZbZclAttrRead(clusterPtr, ZCL_ONOFF_ATTR_ONOFF, NULL,
+      &attrVal, sizeof(attrVal), false) != ZCL_STATUS_SUCCESS)
+  {
+    return ZCL_STATUS_FAILURE;
+  }
+  if (attrVal)
+  {
+    APP_DBG("RESTORE LED_RED TO ON");
+    BSP_LED_On(LED_RED);
+  }
+  else
+  {
+    APP_DBG("RESTORE LED_RED TO OFF");
+    BSP_LED_Off(LED_RED);
+  }
+
+  return ZCL_STATUS_SUCCESS;
+} /* APP_ZIGBEE_RestoreClusterAttr */
+
+
+#ifdef CFG_NVM
+/**
+ * @brief  Init the NVM
+ * @param  None
+ * @retval None
+ */
+static void APP_ZIGBEE_NVM_Init(void)
+{
+  int eeprom_init_status;
+
+  APP_DBG("Flash starting address = %x",HW_FLASH_ADDRESS  + CFG_NVM_BASE_ADDRESS);
+  eeprom_init_status = EE_Init( 0 , HW_FLASH_ADDRESS + CFG_NVM_BASE_ADDRESS );
+
+  if(eeprom_init_status != EE_OK)
+  {
+    /* format NVM since init failed */
+    eeprom_init_status= EE_Init( 1, HW_FLASH_ADDRESS + CFG_NVM_BASE_ADDRESS );
+  }
+  APP_DBG("EE_init status = %d",eeprom_init_status);
+
+} /* APP_ZIGBEE_NVM_Init */
+
+/**
+*@brief  Read the persistent data from NVM
+* @param  None
+* @retval true if success , false if failed
+*/
+static bool APP_ZIGBEE_NVM_Read(void)
+{
+  uint16_t num_words = 0;
+  bool status = true;
+  int ee_status = 0;
+  HAL_FLASH_Unlock();
+  __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_PGSERR | FLASH_FLAG_WRPERR | FLASH_FLAG_OPTVERR);
+
+  /* Read the data length from cache */
+  ee_status = EE_Read(0, ZIGBEE_DB_START_ADDR, &cache_persistent_data.U32_data[0]);
+  if (ee_status != EE_OK)
+  {
+    APP_DBG("Read -> persistent data length not found ERASE to be done - Read Stopped");
+    status = false;
+  }
+  /* Check length is not too big nor zero */
+  else if((cache_persistent_data.U32_data[0] == 0) ||
+          (cache_persistent_data.U32_data[0]> ST_PERSIST_MAX_ALLOC_SZ))
+  {
+    APP_DBG("No data or too large length : %d", cache_persistent_data.U32_data[0]);
+    status = false;
+  }
+  /* Length is within range */
+  else
+  {
+    /* Adjust the length to be U32 aligned */
+    num_words = (uint16_t) (cache_persistent_data.U32_data[0]/4) ;
+    if (cache_persistent_data.U32_data[0] % 4 != 0)
+    {
+      num_words++;
+    }
+
+    /* copy the read data from Flash to cache including length */
+    for (uint16_t local_length = 1; local_length <= num_words; local_length++)
+    {
+      /* read data from first data in U32 unit */
+      ee_status = EE_Read(0, local_length + ZIGBEE_DB_START_ADDR, &cache_persistent_data.U32_data[local_length] );
+      if (ee_status != EE_OK)
+      {
+        APP_DBG("Read not found leaving");
+        status = false;
+        break;
+      }
+    }
+  }
+
+  HAL_FLASH_Lock();
+  if(status)
+  {
+    APP_DBG("READ PERSISTENT DATA LEN = %d",cache_persistent_data.U32_data[0]);
+  }
+  return status;
+} /* APP_ZIGBEE_NVM_Read */
+
+/**
+ * @brief  Write the persistent data in NVM
+ * @param  None
+ * @retval None
+ */
+static bool APP_ZIGBEE_NVM_Write(void)
+{
+  int ee_status = 0;
+
+  uint16_t num_words;
+  uint16_t local_current_size;
+
+  num_words = 1U; /* 1 words for the length */
+  num_words+= (uint16_t) (cache_persistent_data.U32_data[0]/4);
+
+  /* Adjust the length to be U32 aligned */
+  if (cache_persistent_data.U32_data[0] % 4 != 0)
+  {
+    num_words++;
+  }
+
+  /* Save data to flash */
+  for (local_current_size = 0; local_current_size < num_words; local_current_size++)
+  {
+    ee_status = EE_Write(0, (uint16_t)local_current_size + ZIGBEE_DB_START_ADDR, cache_persistent_data.U32_data[local_current_size]);
+    if (ee_status != EE_OK)
+    {
+      if(ee_status == EE_CLEAN_NEEDED) /* Shall not be there if CFG_EE_AUTO_CLEAN = 1*/
+      {
+        APP_DBG("CLEAN NEEDED, CLEANING");
+        EE_Clean(0,0);
+      }
+      else
+      {
+        /* Failed to write, an Erase shall be done */
+        APP_DBG("APP_ZIGBEE_NVM_Write failed @ %d status %d", local_current_size,ee_status);
+        break;
+      }
+    }
+  }
+
+  if(ee_status != EE_OK)
+  {
+    APP_DBG("WRITE STOPPED, need a FLASH ERASE");
+    return false;
+  }
+
+  APP_DBG("WRITTEN PERSISTENT DATA LEN = %d",cache_persistent_data.U32_data[0]);
+  return true;
+
+} /* APP_ZIGBEE_NVM_Write */
+
+/**
+ * @brief  Erase the NVM
+ * @param  None
+ * @retval None
+ */
+static void APP_ZIGBEE_NVM_Erase(void)
+{
+  EE_Init(1, HW_FLASH_ADDRESS + CFG_NVM_BASE_ADDRESS); /* Erase Flash */
+} /* APP_ZIGBEE_NVM_Erase */
+
+#endif /* CFG_NVM */
 
 /* USER CODE END FD_LOCAL_FUNCTIONS */
